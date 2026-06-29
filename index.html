@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Asistente de documentos de trabajo</title>
+
+  <!-- PDF.js para extraer texto de PDFs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Mammoth.js para extraer texto de DOCX -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <!-- SheetJS para Excel -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- Supabase cliente -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <!-- Transformers.js para embeddings en el navegador -->
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+    env.allowLocalModels = false;
+    window._pipelineFn = pipeline;
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f8f9fa; --surface: #fff; --border: #e2e8f0;
+      --primary: #4F46E5; --primary-light: #EEF2FF;
+      --text: #1e293b; --text-muted: #64748b;
+      --success: #16a34a; --success-light: #dcfce7;
+      --warn: #b45309; --warn-light: #fef3c7;
+      --danger: #dc2626; --danger-light: #fee2e2;
+      --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,.08);
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: var(--bg); color: var(--text); height: 100dvh;
+           display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── LOGIN ── */
+    #login-screen {
+      display: flex; align-items: center; justify-content: center;
+      flex: 1; padding: 24px;
+    }
+    .login-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 36px 32px;
+      width: 100%; max-width: 380px; box-shadow: var(--shadow);
+    }
+    .login-card h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+    .login-card p  { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; }
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+    .field label { font-size: 13px; font-weight: 500; }
+    .field input {
+      padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 14px; outline: none; transition: border-color .15s;
+    }
+    .field input:focus { border-color: var(--primary); }
+    .btn {
+      width: 100%; padding: 10px; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 500; cursor: pointer; transition: opacity .15s;
+    }
+    .btn:hover { opacity: .88; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-danger  { background: var(--danger);  color: #fff; padding: 6px 12px; width: auto; font-size: 13px; }
+    #login-error { font-size: 13px; color: var(--danger); margin-top: 10px; display: none; }
+
+    /* ── APP SHELL ── */
+    #app { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+    .topbar {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 18px; display: flex; align-items: center; gap: 12px;
+      flex-shrink: 0;
+    }
+    .topbar h1 { font-size: 15px; font-weight: 600; flex: 1; }
+    .topbar span { font-size: 12px; color: var(--text-muted); }
+    .main { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── SIDEBAR ── */
+    .sidebar {
+      width: 230px; min-width: 230px; background: var(--surface);
+      border-right: 1px solid var(--border); display: flex;
+      flex-direction: column; padding: 14px 12px; gap: 10px;
+      overflow-y: auto; flex-shrink: 0;
+    }
+    .sidebar-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+    #upload-zone {
+      border: 1.5px dashed var(--border); border-radius: 8px;
+      padding: 14px 10px; text-align: center; cursor: pointer;
+      font-size: 12px; color: var(--text-muted); transition: border-color .15s, background .15s;
+    }
+    #upload-zone:hover, #upload-zone.drag  { border-color: var(--primary); background: var(--primary-light); }
+    #upload-zone input { display: none; }
+    #upload-zone span { display: block; font-size: 22px; margin-bottom: 4px; }
+    #index-btn {
+      width: 100%; padding: 8px; background: var(--primary); color: #fff;
+      border: none; border-radius: 8px; font-size: 13px; font-weight: 500;
+      cursor: pointer; display: none; transition: opacity .15s;
+    }
+    #index-btn:hover { opacity: .88; }
+    #index-progress { font-size: 12px; color: var(--text-muted); display: none; }
+    hr.divider { border: none; border-top: 1px solid var(--border); }
+    #docs-list { display: flex; flex-direction: column; gap: 6px; }
+    .doc-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 8px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 12px;
+    }
+    .doc-item .doc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .doc-item .doc-del {
+      background: none; border: none; cursor: pointer; font-size: 15px;
+      color: var(--text-muted); padding: 2px; flex-shrink: 0;
+      display: none; /* solo visible para admin */
+    }
+    .admin .doc-item .doc-del { display: block; }
+    #no-docs { font-size: 12px; color: var(--text-muted); }
+
+    /* ── CHAT ── */
+    .chat { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #messages {
+      flex: 1; overflow-y: auto; padding: 18px 20px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .msg { display: flex; gap: 10px; align-items: flex-start; max-width: 85%; }
+    .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+    .avatar {
+      width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 600;
+    }
+    .avatar.ai   { background: #EEF2FF; color: #4F46E5; }
+    .avatar.user { background: #DCFCE7; color: #166534; }
+    .bubble {
+      padding: 10px 14px; border-radius: 12px; font-size: 14px;
+      line-height: 1.55; border: 1px solid var(--border); background: var(--surface);
+    }
+    .msg.user .bubble { background: var(--primary-light); border-color: #c7d2fe; }
+    .sources { margin-top: 5px; font-size: 11px; color: var(--text-muted); }
+    .chat-input-row {
+      padding: 12px 16px; border-top: 1px solid var(--border);
+      display: flex; gap: 8px; align-items: center; flex-shrink: 0;
+      background: var(--surface);
+    }
+    #question-input {
+      flex: 1; padding: 9px 14px; border: 1px solid var(--border);
+      border-radius: 8px; font-size: 14px; outline: none; transition: border-color .15s;
+    }
+    #question-input:focus { border-color: var(--primary); }
+    #send-btn {
+      padding: 9px 16px; background: var(--primary); color: #fff;
+      border: none; border-radius: 8px; font-size: 14px; font-weight: 500;
+      cursor: pointer; flex-shrink: 0; transition: opacity .15s;
+    }
+    #send-btn:hover  { opacity: .88; }
+    #send-btn:disabled { opacity: .5; cursor: default; }
+
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 500; }
+    .tag-ok { background: var(--success-light); color: var(--success); }
+    .tag-warn { background: var(--warn-light); color: var(--warn); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 600px) {
+      .sidebar { width: 180px; min-width: 180px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════ LOGIN ══════════════ -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>📚 Asistente de documentos</h1>
+    <p>Ingresá con tu cuenta de trabajo para continuar.</p>
+    <div class="field">
+      <label for="email">Email</label>
+      <input type="email" id="email" placeholder="tu@email.com" autocomplete="email">
+    </div>
+    <div class="field">
+      <label for="password">Contraseña</label>
+      <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary" id="login-btn">Ingresar</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- ══════════════ APP ══════════════ -->
+<div id="app">
+  <div class="topbar">
+    <h1>📚 Asistente de documentos de trabajo</h1>
+    <span id="user-email"></span>
+    <button class="btn btn-danger" id="logout-btn">Salir</button>
+  </div>
+
+  <div class="main">
+    <!-- Sidebar (solo admin ve upload) -->
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-title">Documentos</div>
+
+      <!-- Upload (solo admin) -->
+      <div id="admin-upload" style="display:none; flex-direction:column; gap:8px;">
+        <div id="upload-zone">
+          <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.xlsm" multiple>
+          <span>📎</span>
+          Arrastrá o hacé clic para subir<br>PDF · Word · Excel
+        </div>
+        <button id="index-btn">⚡ Indexar archivos</button>
+        <div id="index-progress"></div>
+      </div>
+
+      <hr class="divider">
+      <div class="sidebar-title">Cargados</div>
+      <div id="docs-list"><div id="no-docs">Cargando...</div></div>
+    </div>
+
+    <!-- Chat -->
+    <div class="chat">
+      <div id="messages">
+        <div class="msg">
+          <div class="avatar ai">AI</div>
+          <div class="bubble">
+            ¡Hola! Preguntame lo que necesites sobre los documentos de trabajo.
+            Respondo citando de qué archivo y qué parte salió cada dato. 💬
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-row">
+        <input type="text" id="question-input" placeholder="Escribí tu pregunta acá...">
+        <button id="send-btn">Enviar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// CONFIGURACIÓN — reemplazá con tus valores de Supabase
+// ══════════════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://lsqlrmtaxsrnwdrpkvrj.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxzcWxybXRheHNybndkcnBrdnJqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI2MDE2ODcsImV4cCI6MjA5ODE3NzY4N30.UpdtmQnieGhve-gTq0u9tYPkrH-wFWw6qedKDXcasA4';
+const ADMIN_EMAIL   = 'crisriverajurado@gmail.com';  // solo este email puede subir docs
+// ══════════════════════════════════════════════════════════════
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+let embedder = null;
+let currentUser = null;
+let pendingFiles = [];
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ─── Helpers ───────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function addMessage(role, html, sources = []) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  const initials = role === 'ai' ? 'AI' : (currentUser?.email?.[0] ?? 'Vos').toUpperCase();
+  let sourcesHtml = sources.length
+    ? `<div class="sources">📎 ${sources.join(' · ')}</div>` : '';
+  wrap.innerHTML = `
+    <div class="avatar ${role}">${initials}</div>
+    <div>
+      <div class="bubble">${html}</div>
+      ${sourcesHtml}
+    </div>`;
+  $('messages').appendChild(wrap);
+  $('messages').scrollTop = $('messages').scrollHeight;
+}
+
+function setProgress(msg) { $('index-progress').style.display = msg ? 'block' : 'none'; $('index-progress').textContent = msg; }
+
+function chunkText(text, size = 1000, overlap = 150) {
+  if (text.length <= size) return [text];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    chunks.push(text.slice(start, start + size));
+    if (start + size >= text.length) break;
+    start += size - overlap;
+  }
+  return chunks;
+}
+
+// ─── Extracción de texto ───────────────────────────────────
+async function extractPDF(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const text = content.items.map(it => it.str).join(' ').trim();
+    if (text) pages.push({ text, location: `página ${i}` });
+  }
+  return pages;
+}
+
+async function extractDOCX(file) {
+  const buf = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer: buf });
+  return result.value.trim()
+    ? [{ text: result.value.trim(), location: 'cuerpo del documento' }] : [];
+}
+
+async function extractXLSX(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const pages = [];
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    if (rows.length < 2) continue;
+    const headers = rows[0].map(String);
+    const lines = rows.slice(1)
+      .filter(r => r.some(c => String(c).trim()))
+      .map(r => headers.map((h, i) => `${h}: ${r[i]}`).filter(p => !p.endsWith(': ')).join(', '));
+    if (lines.length) pages.push({ text: lines.join('\n'), location: `hoja '${sheetName}'` });
+  }
+  return pages;
+}
+
+async function extractFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'pdf')  return extractPDF(file);
+  if (ext === 'docx') return extractDOCX(file);
+  if (ext === 'xlsx' || ext === 'xlsm') return extractXLSX(file);
+  return [];
+}
+
+// ─── Embeddings en el navegador ───────────────────────────
+async function getEmbedder() {
+  if (embedder) return embedder;
+  setProgress('Cargando modelo de búsqueda (primera vez ~30 seg)...');
+  embedder = await window._pipelineFn('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2');
+  setProgress('');
+  return embedder;
+}
+
+async function embed(texts) {
+  const e = await getEmbedder();
+  const out = await e(texts, { pooling: 'mean', normalize: true });
+  return Array.from(out.data);
+}
+
+async function embedChunks(chunks) {
+  // Procesar de a 8 para no saturar el navegador
+  const results = [];
+  for (let i = 0; i < chunks.length; i += 8) {
+    const batch = chunks.slice(i, i + 8);
+    const flat = await embed(batch);
+    const dim = flat.length / batch.length;
+    for (let j = 0; j < batch.length; j++) {
+      results.push(Array.from(flat.slice(j * dim, (j + 1) * dim)));
+    }
+  }
+  return results;
+}
+
+// ─── Indexar archivos ─────────────────────────────────────
+async function indexFiles() {
+  if (!pendingFiles.length) return;
+  $('index-btn').disabled = true;
+
+  const session = await sb.auth.getSession();
+  const token = session.data.session?.access_token;
+
+  for (const file of pendingFiles) {
+    try {
+      setProgress(`Extrayendo texto de ${file.name}...`);
+      const pages = await extractFile(file);
+
+      if (!pages.length) {
+        addMessage('ai', `⚠️ <b>${file.name}</b>: no se pudo extraer texto (¿PDF escaneado?).`);
+        continue;
+      }
+
+      // Fragmentar cada página/hoja
+      const fragments = [];
+      for (const page of pages) {
+        for (const chunk of chunkText(page.text)) {
+          fragments.push({ content: chunk, location: page.location });
+        }
+      }
+
+      setProgress(`Calculando embeddings para ${file.name} (${fragments.length} fragmentos)...`);
+      const texts = fragments.map(f => f.content);
+      const embeddings = await embedChunks(texts);
+      const enriched = fragments.map((f, i) => ({ ...f, embedding: embeddings[i] }));
+
+      setProgress(`Guardando ${file.name} en la base de datos...`);
+      const buf = await file.arrayBuffer();
+      const hash = await crypto.subtle.digest('SHA-256', buf)
+        .then(h => Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16));
+
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'upsert', filename: file.name, hash, size: file.size, fragments: enriched }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      addMessage('ai', `✅ <b>${file.name}</b> indexado correctamente (${enriched.length} fragmentos).`);
+      await loadDocs();
+    } catch (err) {
+      addMessage('ai', `❌ Error al procesar <b>${file.name}</b>: ${err.message}`);
+    }
+  }
+
+  pendingFiles = [];
+  $('upload-zone').querySelector('span').textContent = '📎';
+  $('index-btn').style.display = 'none';
+  setProgress('');
+  $('index-btn').disabled = false;
+}
+
+// ─── Cargar lista de documentos ───────────────────────────
+async function loadDocs() {
+  const { data, error } = await sb.from('documents').select('name, size').order('name');
+  const list = $('docs-list');
+  list.innerHTML = '';
+  if (error || !data?.length) {
+    list.innerHTML = '<div id="no-docs">Ningún documento todavía.</div>';
+    return;
+  }
+  for (const doc of data) {
+    const item = document.createElement('div');
+    item.className = 'doc-item';
+    const kb = (doc.size / 1024).toFixed(0);
+    item.innerHTML = `
+      <span>📄</span>
+      <span class="doc-name" title="${doc.name}">${doc.name}</span>
+      <span style="font-size:10px;color:var(--text-muted)">${kb}KB</span>
+      <button class="doc-del" title="Eliminar" data-name="${doc.name}">🗑️</button>`;
+    list.appendChild(item);
+  }
+  // Evento de borrado (solo admin ve el botón)
+  list.querySelectorAll('.doc-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(`¿Borrar "${btn.dataset.name}"?`)) return;
+      const session = await sb.auth.getSession();
+      const token = session.data.session?.access_token;
+      await fetch(`${SUPABASE_URL}/functions/v1/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'delete', filename: btn.dataset.name }),
+      });
+      await loadDocs();
+    });
+  });
+}
+
+// ─── Hacer una pregunta ───────────────────────────────────
+async function ask() {
+  const q = $('question-input').value.trim();
+  if (!q) return;
+  $('question-input').value = '';
+  $('send-btn').disabled = true;
+
+  addMessage('user', q);
+
+  const thinking = document.createElement('div');
+  thinking.className = 'msg';
+  thinking.innerHTML = `<div class="avatar ai">AI</div><div class="bubble" style="color:var(--text-muted)">Buscando en tus documentos...</div>`;
+  $('messages').appendChild(thinking);
+  $('messages').scrollTop = $('messages').scrollHeight;
+
+  try {
+    // Calcular embedding de la pregunta en el navegador
+    const qEmbedding = await embed([q]);
+    const dim = qEmbedding.length / 1;
+    const embArray = Array.from(qEmbedding.slice(0, dim));
+
+    const session = await sb.auth.getSession();
+    const token = session.data.session?.access_token;
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ question: q, embedding: embArray }),
+    });
+    const data = await res.json();
+
+    thinking.remove();
+    if (data.error) throw new Error(data.error);
+    addMessage('ai', data.answer.replace(/\n/g, '<br>'), data.sources ?? []);
+  } catch (err) {
+    thinking.remove();
+    addMessage('ai', `❌ Error: ${err.message}`);
+  }
+
+  $('send-btn').disabled = false;
+  $('question-input').focus();
+}
+
+// ─── Auth ─────────────────────────────────────────────────
+async function onLogin(user) {
+  currentUser = user;
+  $('login-screen').style.display = 'none';
+  $('app').style.display = 'flex';
+  $('user-email').textContent = user.email;
+
+  const isAdmin = user.email === ADMIN_EMAIL;
+  if (isAdmin) {
+    $('sidebar').classList.add('admin');
+    $('admin-upload').style.display = 'flex';
+    // Cargar embedder en segundo plano
+    getEmbedder().catch(() => {});
+  }
+
+  await loadDocs();
+}
+
+$('login-btn').addEventListener('click', async () => {
+  const email = $('email').value.trim();
+  const pass  = $('password').value;
+  $('login-error').style.display = 'none';
+  $('login-btn').textContent = 'Ingresando...';
+  $('login-btn').disabled = true;
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+
+  $('login-btn').textContent = 'Ingresar';
+  $('login-btn').disabled = false;
+
+  if (error) {
+    $('login-error').textContent = 'Email o contraseña incorrectos.';
+    $('login-error').style.display = 'block';
+    return;
+  }
+  onLogin(data.user);
+});
+
+$('password').addEventListener('keydown', e => { if (e.key === 'Enter') $('login-btn').click(); });
+
+$('logout-btn').addEventListener('click', async () => {
+  await sb.auth.signOut();
+  $('app').style.display = 'none';
+  $('login-screen').style.display = 'flex';
+  currentUser = null;
+  embedder = null;
+});
+
+// ─── Upload & drag-drop ───────────────────────────────────
+$('upload-zone').addEventListener('click', () => $('file-input').click());
+$('upload-zone').addEventListener('dragover', e => { e.preventDefault(); $('upload-zone').classList.add('drag'); });
+$('upload-zone').addEventListener('dragleave', () => $('upload-zone').classList.remove('drag'));
+$('upload-zone').addEventListener('drop', e => {
+  e.preventDefault();
+  $('upload-zone').classList.remove('drag');
+  handleFiles([...(e.dataTransfer.files ?? [])]);
+});
+$('file-input').addEventListener('change', () => handleFiles([...$('file-input').files]));
+
+function handleFiles(files) {
+  const valid = files.filter(f => /\.(pdf|docx|xlsx|xlsm)$/i.test(f.name));
+  if (!valid.length) return;
+  pendingFiles = valid;
+  $('upload-zone').querySelector('span').textContent = `📎 ${valid.length} archivo(s) listo(s)`;
+  $('index-btn').style.display = 'block';
+}
+
+$('index-btn').addEventListener('click', indexFiles);
+
+// ─── Chat ─────────────────────────────────────────────────
+$('send-btn').addEventListener('click', ask);
+$('question-input').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+
+// ─── Sesión activa ────────────────────────────────────────
+sb.auth.getSession().then(({ data }) => {
+  if (data.session?.user) onLogin(data.session.user);
+});
+</script>
+</body>
+</html>
