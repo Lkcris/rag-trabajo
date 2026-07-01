@@ -52,6 +52,7 @@
     .field input {
       padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
       font-size: 14px; outline: none; transition: border-color .15s;
+      background: var(--bg); color: var(--text);
     }
     .field input:focus { border-color: var(--primary); }
     .btn {
@@ -96,7 +97,36 @@
       cursor: pointer; display: none; transition: opacity .15s;
     }
     #index-btn:hover { opacity: .88; }
-    #index-progress { font-size: 12px; color: var(--text-muted); display: none; }
+    #index-progress { display: none; margin-top: 4px; }
+    .progress-label {
+      font-size: 11.5px; color: var(--text-muted); margin-bottom: 6px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .progress-label span { font-weight: 600; color: var(--text); }
+    .progress-track {
+      height: 6px; background: var(--border); border-radius: 99px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 99px; background: var(--primary);
+      width: 0%; transition: width .4s ease;
+    }
+    .progress-fill.indeterminate {
+      width: 40%;
+      animation: indeterminate 1.4s ease-in-out infinite;
+    }
+    @keyframes indeterminate {
+      0%   { transform: translateX(-120%); }
+      100% { transform: translateX(280%); }
+    }
+    .progress-steps {
+      display: flex; gap: 4px; margin-top: 7px;
+    }
+    .step {
+      flex: 1; height: 3px; border-radius: 99px; background: var(--border);
+      transition: background .3s;
+    }
+    .step.done { background: var(--primary); }
+    .step.active { background: var(--primary); opacity: .45; }
     hr.divider { border: none; border-top: 1px solid var(--border); }
     #docs-list { display: flex; flex-direction: column; gap: 6px; }
     .doc-item {
@@ -142,6 +172,7 @@
     #question-input {
       flex: 1; padding: 9px 14px; border: 1px solid var(--border);
       border-radius: 8px; font-size: 14px; outline: none; transition: border-color .15s;
+      background: var(--bg); color: var(--text);
     }
     #question-input:focus { border-color: var(--primary); }
     #send-btn {
@@ -167,7 +198,7 @@
 <!-- ══════════════ LOGIN ══════════════ -->
 <div id="login-screen">
   <div class="login-card">
-    <h1>📚 Asistente de documentos</h1>
+    <h1>Asistente de documentos</h1>
     <p>Ingresá con tu cuenta de trabajo para continuar.</p>
     <div class="field">
       <label for="email">Email</label>
@@ -185,7 +216,7 @@
 <!-- ══════════════ APP ══════════════ -->
 <div id="app">
   <div class="topbar">
-    <h1>📚 Asistente de documentos de trabajo</h1>
+    <h1>Asistente de documentos de trabajo</h1>
     <span id="user-email"></span>
     <button class="btn btn-danger" id="logout-btn">Salir</button>
   </div>
@@ -199,11 +230,21 @@
       <div id="admin-upload" style="display:none; flex-direction:column; gap:8px;">
         <div id="upload-zone">
           <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.xlsm" multiple>
-          <span>📎</span>
+          <span>+</span>
           Arrastrá o hacé clic para subir<br>PDF · Word · Excel
         </div>
-        <button id="index-btn">⚡ Indexar archivos</button>
-        <div id="index-progress"></div>
+        <button id="index-btn">Indexar archivos</button>
+        <div id="index-progress">
+          <div class="progress-label" id="progress-label">Iniciando...</div>
+          <div class="progress-track">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-steps">
+            <div class="step" id="step-1"></div>
+            <div class="step" id="step-2"></div>
+            <div class="step" id="step-3"></div>
+          </div>
+        </div>
       </div>
 
       <hr class="divider">
@@ -217,8 +258,8 @@
         <div class="msg">
           <div class="avatar ai">AI</div>
           <div class="bubble">
-            ¡Hola! Preguntame lo que necesites sobre los documentos de trabajo.
-            Respondo citando de qué archivo y qué parte salió cada dato. 💬
+            Hola, preguntame lo que necesites sobre los documentos de trabajo.
+            Respondo citando de qué archivo y qué parte salió cada dato.
           </div>
         </div>
       </div>
@@ -268,7 +309,38 @@ function addMessage(role, html, sources = []) {
   $('messages').scrollTop = $('messages').scrollHeight;
 }
 
-function setProgress(msg) { $('index-progress').style.display = msg ? 'block' : 'none'; $('index-progress').textContent = msg; }
+function setProgress(msg, step=0, pct=null) {
+  const wrap  = $('index-progress');
+  const label = $('progress-label');
+  const fill  = $('progress-fill');
+  if (!wrap || !label || !fill) return; // no-admin: elementos no existen en DOM
+
+  if (!msg) {
+    wrap.style.display = 'none';
+    fill.style.width = '0%';
+    fill.classList.remove('indeterminate');
+    [1,2,3].forEach(i => { const s = $(`step-${i}`); if(s) s.className = 'step'; });
+    return;
+  }
+
+  wrap.style.display = 'block';
+  label.innerHTML = msg;
+
+  if (pct !== null) {
+    fill.classList.remove('indeterminate');
+    fill.style.width = pct + '%';
+  } else {
+    fill.classList.add('indeterminate');
+  }
+
+  [1,2,3].forEach(i => {
+    const el = $(`step-${i}`);
+    if (!el) return;
+    if (i < step)        el.className = 'step done';
+    else if (i === step) el.className = 'step active';
+    else                 el.className = 'step';
+  });
+}
 
 function chunkText(text, size = 1000, overlap = 150) {
   if (text.length <= size) return [text];
@@ -331,7 +403,14 @@ async function extractFile(file) {
 // ─── Embeddings en el navegador ───────────────────────────
 async function getEmbedder() {
   if (embedder) return embedder;
-  setProgress('Cargando modelo de búsqueda (primera vez ~30 seg)...');
+  setProgress('Cargando modelo de búsqueda... <span>(primera vez ~30 seg)</span>', 1);
+  // Esperar a que el módulo ESM termine de cargar _pipelineFn
+  let attempts = 0;
+  while (!window._pipelineFn && attempts < 50) {
+    await new Promise(r => setTimeout(r, 200));
+    attempts++;
+  }
+  if (!window._pipelineFn) throw new Error('No se pudo cargar el modelo de búsqueda. Recargá la página.');
   embedder = await window._pipelineFn('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2');
   setProgress('');
   return embedder;
@@ -367,11 +446,11 @@ async function indexFiles() {
 
   for (const file of pendingFiles) {
     try {
-      setProgress(`Extrayendo texto de ${file.name}...`);
+      setProgress(`Leyendo ${file.name}...`, 1, 15);
       const pages = await extractFile(file);
 
       if (!pages.length) {
-        addMessage('ai', `⚠️ <b>${file.name}</b>: no se pudo extraer texto (¿PDF escaneado?).`);
+        addMessage('ai', `<b>${file.name}</b>: no se pudo extraer texto (¿PDF escaneado?).`);
         continue;
       }
 
@@ -383,12 +462,12 @@ async function indexFiles() {
         }
       }
 
-      setProgress(`Calculando embeddings para ${file.name} (${fragments.length} fragmentos)...`);
+      setProgress(`Calculando búsqueda semántica... <span>${fragments.length} fragmentos</span>`, 2, 55);
       const texts = fragments.map(f => f.content);
       const embeddings = await embedChunks(texts);
       const enriched = fragments.map((f, i) => ({ ...f, embedding: embeddings[i] }));
 
-      setProgress(`Guardando ${file.name} en la base de datos...`);
+      setProgress(`Guardando en la base de datos...`, 3, 85);
       const buf = await file.arrayBuffer();
       const hash = await crypto.subtle.digest('SHA-256', buf)
         .then(h => Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16));
@@ -401,10 +480,10 @@ async function indexFiles() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      addMessage('ai', `✅ <b>${file.name}</b> indexado correctamente (${enriched.length} fragmentos).`);
+      addMessage('ai', `<b>${file.name}</b> indexado correctamente (${enriched.length} fragmentos).`);
       await loadDocs();
     } catch (err) {
-      addMessage('ai', `❌ Error al procesar <b>${file.name}</b>: ${err.message}`);
+      addMessage('ai', `Error al procesar <b>${file.name}</b>: ${err.message}`);
     }
   }
 
@@ -429,10 +508,10 @@ async function loadDocs() {
     item.className = 'doc-item';
     const kb = (doc.size / 1024).toFixed(0);
     item.innerHTML = `
-      <span>📄</span>
+      <span style="color:var(--text-muted);font-size:11px;">doc</span>
       <span class="doc-name" title="${doc.name}">${doc.name}</span>
       <span style="font-size:10px;color:var(--text-muted)">${kb}KB</span>
-      <button class="doc-del" title="Eliminar" data-name="${doc.name}">🗑️</button>`;
+      <button class="doc-del" title="Eliminar" data-name="${doc.name}">x</button>`;
     list.appendChild(item);
   }
   // Evento de borrado (solo admin ve el botón)
@@ -487,7 +566,7 @@ async function ask() {
     addMessage('ai', data.answer.replace(/\n/g, '<br>'), data.sources ?? []);
   } catch (err) {
     thinking.remove();
-    addMessage('ai', `❌ Error: ${err.message}`);
+    addMessage('ai', `Error: ${err.message}`);
   }
 
   $('send-btn').disabled = false;
@@ -557,7 +636,7 @@ function handleFiles(files) {
   const valid = files.filter(f => /\.(pdf|docx|xlsx|xlsm)$/i.test(f.name));
   if (!valid.length) return;
   pendingFiles = valid;
-  $('upload-zone').querySelector('span').textContent = `📎 ${valid.length} archivo(s) listo(s)`;
+  $('upload-zone').querySelector('span').textContent = `+ ${valid.length} archivo(s) listo(s)`;
   $('index-btn').style.display = 'block';
 }
 
