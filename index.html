@@ -298,7 +298,7 @@ function addMessage(role, html, sources = []) {
   wrap.className = `msg ${role}`;
   const initials = role === 'ai' ? 'AI' : (currentUser?.email?.[0] ?? 'Vos').toUpperCase();
   let sourcesHtml = sources.length
-    ? `<div class="sources">📎 ${sources.join(' · ')}</div>` : '';
+    ? `<div class="sources">Fuentes: ${sources.join(' · ')}</div>` : '';
   wrap.innerHTML = `
     <div class="avatar ${role}">${initials}</div>
     <div>
@@ -401,6 +401,32 @@ async function extractFile(file) {
 }
 
 // ─── Embeddings en el navegador ───────────────────────────
+async function fetchWithRetry(url, options, retries=3) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        let body = '';
+        try { body = await res.clone().text(); } catch(_) {}
+        throw new Error('Error ' + res.status + ': ' + body.slice(0,200));
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      const esRed = err.message === 'Failed to fetch' || err.name === 'TypeError';
+      if (esRed && i < retries - 1) {
+        setProgress('Reintentando conexion (intento ' + (i+2) + '/' + retries + ')...', 3, 80);
+        await new Promise(r => setTimeout(r, 1500 * (i + 1)));
+      } else { break; }
+    }
+  }
+  if (lastError && (lastError.message === 'Failed to fetch' || lastError.name === 'TypeError')) {
+    throw new Error('No se pudo conectar con Supabase. Verifica tu conexion a internet o que la Edge Function este activa.');
+  }
+  throw lastError;
+}
+
 async function getEmbedder() {
   if (embedder) return embedder;
   setProgress('Cargando modelo de búsqueda... <span>(primera vez ~30 seg)</span>', 1);
@@ -444,6 +470,12 @@ async function indexFiles() {
   const session = await sb.auth.getSession();
   const token = session.data.session?.access_token;
 
+  if (!token) {
+    addMessage('ai', 'Tu sesion expiro. Cerra sesion y volve a entrar.');
+    $('index-btn').disabled = false;
+    return;
+  }
+
   for (const file of pendingFiles) {
     try {
       setProgress(`Leyendo ${file.name}...`, 1, 15);
@@ -467,18 +499,36 @@ async function indexFiles() {
       const embeddings = await embedChunks(texts);
       const enriched = fragments.map((f, i) => ({ ...f, embedding: embeddings[i] }));
 
-      setProgress(`Guardando en la base de datos...`, 3, 85);
-      const buf = await file.arrayBuffer();
-      const hash = await crypto.subtle.digest('SHA-256', buf)
-        .then(h => Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16));
+      // Calcular hash antes de guardar
+      const buf2 = await file.arrayBuffer();
+      const hash = await crypto.subtle.digest('SHA-256', buf2)
+        .then(h => Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('').slice(0,16));
 
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/ingest`, {
+      // Primero registrar el documento (sin fragmentos)
+      setProgress(`Guardando documento...`, 3, 80);
+      const resDoc = await fetchWithRetry(`${SUPABASE_URL}/functions/v1/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'upsert', filename: file.name, hash, size: file.size, fragments: enriched }),
+        body: JSON.stringify({ action: 'upsert', filename: file.name, hash, size: file.size, fragments: [] }),
       });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      const docData = await resDoc.json();
+      if (docData.error) throw new Error(docData.error);
+
+      // Enviar fragmentos en lotes de 20 para no superar el límite de payload
+      const LOTE = 20;
+      const total = enriched.length;
+      for (let i = 0; i < total; i += LOTE) {
+        const lote = enriched.slice(i, i + LOTE);
+        const pct = 80 + Math.round(((i + lote.length) / total) * 18);
+        setProgress(`Guardando fragmentos ${i + lote.length}/${total}...`, 3, pct);
+        const res = await fetchWithRetry(`${SUPABASE_URL}/functions/v1/ingest`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ action: 'append', filename: file.name, fragments: lote }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+      }
 
       addMessage('ai', `<b>${file.name}</b> indexado correctamente (${enriched.length} fragmentos).`);
       await loadDocs();
@@ -488,7 +538,7 @@ async function indexFiles() {
   }
 
   pendingFiles = [];
-  $('upload-zone').querySelector('span').textContent = '📎';
+  $('upload-zone').querySelector('span').textContent = '+';
   $('index-btn').style.display = 'none';
   setProgress('');
   $('index-btn').disabled = false;
