@@ -278,6 +278,7 @@
 const SUPABASE_URL  = 'https://lsqlrmtaxsrnwdrpkvrj.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxzcWxybXRheHNybndkcnBrdnJqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI2MDE2ODcsImV4cCI6MjA5ODE3NzY4N30.UpdtmQnieGhve-gTq0u9tYPkrH-wFWw6qedKDXcasA4';
 const ADMIN_EMAIL   = 'crisriverajurado@gmail.com';  // solo este email puede subir docs
+// El OCR de imágenes pasa por la Edge Function de Supabase (no se expone la key aquí)
 // ══════════════════════════════════════════════════════════════
 
 const { createClient } = supabase;
@@ -298,7 +299,7 @@ function addMessage(role, html, sources = []) {
   wrap.className = `msg ${role}`;
   const initials = role === 'ai' ? 'AI' : (currentUser?.email?.[0] ?? 'Vos').toUpperCase();
   let sourcesHtml = sources.length
-    ? `<div class="sources">Fuentes: ${sources.join(' · ')}</div>` : '';
+    ? `<div class="sources">📎 ${sources.join(' · ')}</div>` : '';
   wrap.innerHTML = `
     <div class="avatar ${role}">${initials}</div>
     <div>
@@ -342,6 +343,21 @@ function setProgress(msg, step=0, pct=null) {
   });
 }
 
+// Limpia el texto antes de indexarlo:
+// elimina caracteres de control que rompen JSON y normaliza espacios
+function cleanText(text) {
+  return text
+    // Eliminar caracteres de control (0x00-0x1F) excepto salto de línea y tabulación
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
+    // Reemplazar saltos de línea múltiples por uno solo
+    .replace(/\n{3,}/g, '\n\n')
+    // Reemplazar tabulaciones por espacio
+    .replace(/\t/g, ' ')
+    // Eliminar espacios múltiples
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
 function chunkText(text, size = 1000, overlap = 150) {
   if (text.length <= size) return [text];
   const chunks = [];
@@ -355,6 +371,41 @@ function chunkText(text, size = 1000, overlap = 150) {
 }
 
 // ─── Extracción de texto ───────────────────────────────────
+// Convierte una página PDF a imagen base64 para OCR
+async function pdfPageToBase64(page) {
+  const viewport = page.getViewport({ scale: 1.5 });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+// Llama a la Edge Function de Supabase para hacer OCR con Claude Vision
+// La API key queda guardada de forma segura en Supabase, no en el código
+async function ocrConClaude(base64, tipo = 'image/jpeg') {
+  try {
+    const session = await sb.auth.getSession();
+    const token = session.data.session?.access_token;
+    if (!token) return '';
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/ocr`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ image: base64, mediaType: tipo })
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    return data.text || '';
+  } catch (e) {
+    console.warn('OCR falló:', e.message);
+    return '';
+  }
+}
+
 async function extractPDF(file) {
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
@@ -362,17 +413,50 @@ async function extractPDF(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const text = content.items.map(it => it.str).join(' ').trim();
-    if (text) pages.push({ text, location: `página ${i}` });
+    let text = content.items.map(it => it.str).join(' ').trim();
+
+    // Si la página tiene poco o ningún texto, es imagen — aplicar OCR
+    if (text.length < 50) {
+      setProgress(`OCR página ${i}/${pdf.numPages} de ${file.name}...`, 2, 40);
+      const base64 = await pdfPageToBase64(page);
+      text = await ocrConClaude(base64);
+    }
+
+    const clean = cleanText(text);
+    if (clean) pages.push({ text: clean, location: `página ${i}` });
   }
   return pages;
 }
 
 async function extractDOCX(file) {
   const buf = await file.arrayBuffer();
+  // Extraer texto normal con mammoth
   const result = await mammoth.extractRawText({ arrayBuffer: buf });
-  return result.value.trim()
-    ? [{ text: result.value.trim(), location: 'cuerpo del documento' }] : [];
+  const text = cleanText(result.value || '');
+
+  // Extraer imágenes incrustadas y aplicarles OCR
+  const imgResults = [];
+  try {
+    const resultImg = await mammoth.convertToHtml({
+      arrayBuffer: buf,
+      convertImage: mammoth.images.imgElement(async (image) => {
+        const imgBuf = await image.read('base64');
+        const tipo = image.contentType || 'image/png';
+        const ocrText = await ocrConClaude(imgBuf, tipo);
+        if (ocrText.trim()) imgResults.push(cleanText(ocrText));
+        return { src: '' };
+      })
+    });
+  } catch(e) {
+    console.warn('Extraccion de imagenes DOCX fallo:', e.message);
+  }
+
+  const pages = [];
+  if (text) pages.push({ text, location: 'cuerpo del documento' });
+  imgResults.forEach((t, idx) => {
+    pages.push({ text: t, location: `imagen ${idx + 1} del documento` });
+  });
+  return pages;
 }
 
 async function extractXLSX(file) {
@@ -387,8 +471,11 @@ async function extractXLSX(file) {
     const lines = rows.slice(1)
       .filter(r => r.some(c => String(c).trim()))
       .map(r => headers.map((h, i) => `${h}: ${r[i]}`).filter(p => !p.endsWith(': ')).join(', '));
-    if (lines.length) pages.push({ text: lines.join('\n'), location: `hoja '${sheetName}'` });
+    if (lines.length) pages.push({ text: cleanText(lines.join('\n')), location: `hoja '${sheetName}'` });
   }
+  // Nota: Excel incrusta imágenes en formato binario propietario que
+  // SheetJS no expone. Si el Excel tiene imágenes con datos clave,
+  // lo más práctico es guardar esas hojas como PDF y subirlas aparte.
   return pages;
 }
 
@@ -401,30 +488,17 @@ async function extractFile(file) {
 }
 
 // ─── Embeddings en el navegador ───────────────────────────
+// Reintenta hasta 3 veces si falla la conexión
 async function fetchWithRetry(url, options, retries=3) {
-  let lastError;
   for (let i = 0; i < retries; i++) {
     try {
       const res = await fetch(url, options);
-      if (!res.ok) {
-        let body = '';
-        try { body = await res.clone().text(); } catch(_) {}
-        throw new Error('Error ' + res.status + ': ' + body.slice(0,200));
-      }
       return res;
     } catch (err) {
-      lastError = err;
-      const esRed = err.message === 'Failed to fetch' || err.name === 'TypeError';
-      if (esRed && i < retries - 1) {
-        setProgress('Reintentando conexion (intento ' + (i+2) + '/' + retries + ')...', 3, 80);
-        await new Promise(r => setTimeout(r, 1500 * (i + 1)));
-      } else { break; }
+      if (i === retries - 1) throw err;
+      await new Promise(r => setTimeout(r, 1500 * (i + 1))); // espera 1.5s, 3s, 4.5s
     }
   }
-  if (lastError && (lastError.message === 'Failed to fetch' || lastError.name === 'TypeError')) {
-    throw new Error('No se pudo conectar con Supabase. Verifica tu conexion a internet o que la Edge Function este activa.');
-  }
-  throw lastError;
 }
 
 async function getEmbedder() {
@@ -470,12 +544,6 @@ async function indexFiles() {
   const session = await sb.auth.getSession();
   const token = session.data.session?.access_token;
 
-  if (!token) {
-    addMessage('ai', 'Tu sesion expiro. Cerra sesion y volve a entrar.');
-    $('index-btn').disabled = false;
-    return;
-  }
-
   for (const file of pendingFiles) {
     try {
       setProgress(`Leyendo ${file.name}...`, 1, 15);
@@ -489,7 +557,7 @@ async function indexFiles() {
       // Fragmentar cada página/hoja
       const fragments = [];
       for (const page of pages) {
-        for (const chunk of chunkText(page.text)) {
+        for (const chunk of chunkText(cleanText(page.text))) {
           fragments.push({ content: chunk, location: page.location });
         }
       }
@@ -538,7 +606,7 @@ async function indexFiles() {
   }
 
   pendingFiles = [];
-  $('upload-zone').querySelector('span').textContent = '+';
+  $('upload-zone').querySelector('span').textContent = '📎';
   $('index-btn').style.display = 'none';
   setProgress('');
   $('index-btn').disabled = false;
